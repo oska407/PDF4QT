@@ -120,7 +120,8 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTORCC_OPTIONS "--threshold;0;--compress;9")
 
 if (MSVC)
-    add_compile_options(/bigobj /W4 /wd5054 /wd4127 /wd4702)
+    # /utf-8: the sources (and the tr() strings) are UTF-8 encoded without a BOM.
+    add_compile_options(/bigobj /W4 /wd5054 /wd4127 /wd4702 /utf-8)
 endif()
 
 if(PDF4QT_ENABLE_COVERAGE)

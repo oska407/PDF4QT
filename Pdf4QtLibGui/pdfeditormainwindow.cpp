@@ -45,6 +45,7 @@
 #include "pdfdocumentwriter.h"
 #include "pdfsignaturehandler.h"
 #include "pdfadvancedtools.h"
+#include "pdfcontextualformatpanel.h"
 #include "pdfwidgetutils.h"
 #include "pdfactioncombobox.h"
 
@@ -89,6 +90,7 @@ PDFEditorMainWindow::PDFEditorMainWindow(QWidget* parent) :
     m_sidebarDockWidget(nullptr),
     m_advancedFindWidget(nullptr),
     m_advancedFindDockWidget(nullptr),
+    m_formatPanelDock(nullptr),
     m_pageNumberSpinBox(nullptr),
     m_pageNumberLabel(nullptr),
     m_pageZoomSpinBox(nullptr),
@@ -345,6 +347,26 @@ PDFEditorMainWindow::PDFEditorMainWindow(QWidget* parent) :
     m_sidebarDockWidget->toggleViewAction()->setObjectName("actionSidebar");
     m_actionManager->addAdditionalAction(m_sidebarDockWidget->toggleViewAction());
 
+    // Persistent contextual Format panel. It is owned by this main window via
+    // the Qt parent mechanism, but the destructor deletes it explicitly (before
+    // the program controller) to close its non-owning scene registration while
+    // the widget and the annotation manager still exist.
+    m_formatPanelDock = new pdf::PDFContextualFormatPanel(m_programController->getPdfWidget(), this);
+    addDockWidget(Qt::RightDockWidgetArea, m_formatPanelDock);
+    QAction* toggleFormatPanelAction = m_formatPanelDock->toggleViewAction();
+    // PDFActionManager keeps a raw pointer to this action in m_additionalActions
+    // (see addAdditionalAction() below), while the program controller keeps a raw
+    // pointer to the action manager. The action is therefore re-parented to this
+    // window: it must outlive the dock widget, which is deleted explicitly in the
+    // destructor - exactly like the toggle actions of the other docks, which also
+    // outlive the action manager.
+    toggleFormatPanelAction->setParent(this);
+    toggleFormatPanelAction->setObjectName("actionContextualFormatPanel");
+    toggleFormatPanelAction->setText(tr("&Format"));
+    ui->menuView->addSeparator();
+    ui->menuView->addAction(toggleFormatPanelAction);
+    m_actionManager->addAdditionalAction(toggleFormatPanelAction);
+
     connect(m_progress, &pdf::PDFProgress::progressStarted, this, &PDFEditorMainWindow::onProgressStarted);
     connect(m_progress, &pdf::PDFProgress::progressStep, this, &PDFEditorMainWindow::onProgressStep);
     connect(m_progress, &pdf::PDFProgress::progressFinished, this, &PDFEditorMainWindow::onProgressFinished);
@@ -370,6 +392,14 @@ PDFEditorMainWindow::PDFEditorMainWindow(QWidget* parent) :
 
 PDFEditorMainWindow::~PDFEditorMainWindow()
 {
+    // The Format panel keeps non-owning pointers to the PDF widget and to the
+    // annotation manager of the program controller, so it must be destroyed
+    // before the controller releases them. Its toggle action is a child of this
+    // window (see the constructor), so deleting the dock cannot invalidate the
+    // pointer kept by PDFActionManager::m_additionalActions.
+    delete m_formatPanelDock;
+    m_formatPanelDock = nullptr;
+
     delete m_programController;
     m_programController = nullptr;
 

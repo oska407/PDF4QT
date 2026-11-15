@@ -21,6 +21,8 @@
 // SOFTWARE.
 
 #include "pdfadvancedtools.h"
+#include "pdftexteditpseudowidget.h"
+#include "pdfdrawspacecontroller.h"
 #include "pdfdocumentbuilder.h"
 #include "pdfdrawwidget.h"
 #include "pdfutils.h"
@@ -410,9 +412,19 @@ PDFCreateFreeTextTool::PDFCreateFreeTextTool(PDFDrawWidgetProxy* proxy, PDFToolM
     addTool(m_pickTool);
     connect(m_pickTool, &PDFPickTool::rectanglePicked, this, &PDFCreateFreeTextTool::onRectanglePicked);
 
+    m_textEditWidget = new PDFTextEditPseudowidget(PDFFormField::Multiline);
     updateActions();
 }
 
+PDFCreateFreeTextTool::~PDFCreateFreeTextTool()
+{
+    delete m_textEditWidget;
+    m_textEditWidget = nullptr;
+}
+
+// Legacy modal configuration dialog. Kept as a compatibility entry point for
+// R-19 / P2 only - onRectanglePicked() no longer calls it, so the creation
+// main path has no modal dialog (SAC-02).
 bool PDFCreateFreeTextTool::configureFreeText(QString& text)
 {
     QDialog dialog(getProxy()->getWidget());
@@ -501,25 +513,235 @@ bool PDFCreateFreeTextTool::configureFreeText(QString& text)
 
 void PDFCreateFreeTextTool::onRectanglePicked(PDFInteger pageIndex, QRectF pageRectangle)
 {
-    QString text;
-    if (!configureFreeText(text))
+    if (pageRectangle.isEmpty())
     {
         return;
     }
 
-    PDFDocumentModifier modifier(getDocument());
+    // T09 / R-05: no modal dialog. Enter the on-page visual editing state;
+    // the text comes from the modeless inline editor of the Format panel.
+    startVisualEditing(pageIndex, pageRectangle);
+}
 
-    QString author = PDFAuthorSettings::getAuthorName();
-    PDFObjectReference page = getDocument()->getCatalog()->getPage(pageIndex)->getPageReference();
-    modifier.getBuilder()->createAnnotationFreeText(page, pageRectangle, author, QString(), text, m_style, m_autoResizeToContents);
-    modifier.markAnnotationsChanged();
+void PDFCreateFreeTextTool::startVisualEditing(PDFInteger pageIndex, QRectF pageRectangle)
+{
+    m_editingPageIndex = pageIndex;
+    m_editingRectangle = pageRectangle;
+    m_isVisualEditing = true;
+    m_isFinishing = false;
 
-    if (modifier.finalize())
+    m_textEditWidget->setText(QString());
+    updateVisualAppearance();
+
+    // The rectangle pick tool is on the top of the tool stack; remove it so a
+    // mouse click commits the annotation instead of picking a new rectangle.
+    if (getTopToolstackTool())
     {
-        Q_EMIT m_toolManager->documentModified(PDFModifiedDocument(modifier.getDocument(), nullptr, modifier.getFlags()));
+        removeTool();
     }
 
-    setActive(false);
+    Q_EMIT getProxy()->repaintNeeded();
+}
+
+void PDFCreateFreeTextTool::updateVisualAppearance()
+{
+    QFont font(m_style.fontFamily);
+    if (m_style.fontSize > 0.0)
+    {
+        font.setPointSizeF(m_style.fontSize);
+    }
+
+    const QColor color = m_style.textColor.isValid() ? m_style.textColor : QColor(Qt::black);
+    m_textEditWidget->setAppearance(font,
+                                    Qt::Alignment(m_style.textAlignment),
+                                    m_editingRectangle,
+                                    std::numeric_limits<int>::max(),
+                                    color);
+}
+
+void PDFCreateFreeTextTool::finishVisualEditing()
+{
+    if (!m_isVisualEditing || m_isFinishing)
+    {
+        return;
+    }
+    m_isFinishing = true;
+
+    const QString text = m_textEditWidget->getText();
+    const PDFInteger pageIndex = m_editingPageIndex;
+    const QRectF rectangle = m_editingRectangle;
+
+    m_isVisualEditing = false;
+    m_textEditWidget->setText(QString());
+
+    // Restore the pick tool, so the annotation tool can be used again.
+    if (!getTopToolstackTool())
+    {
+        addTool(m_pickTool);
+    }
+
+    if (!text.trimmed().isEmpty() && getDocument() && pageIndex >= 0)
+    {
+        // Exactly the original creation chain (pdfadvancedtools.cpp:510-520):
+        // PDFDocumentModifier + createAnnotationFreeText +
+        // markAnnotationsChanged + finalize + Q_EMIT documentModified.
+        PDFDocumentModifier modifier(getDocument());
+
+        QString author = PDFAuthorSettings::getAuthorName();
+        PDFObjectReference page = getDocument()->getCatalog()->getPage(pageIndex)->getPageReference();
+        PDFObjectReference annotation = modifier.getBuilder()->createAnnotationFreeText(page, rectangle, author, QString(), text, m_style, m_autoResizeToContents);
+        modifier.markAnnotationsChanged();
+
+        if (modifier.finalize())
+        {
+            Q_EMIT m_toolManager->documentModified(PDFModifiedDocument(modifier.getDocument(), nullptr, modifier.getFlags()));
+
+            if (annotation.isValid())
+            {
+                if (PDFDrawWidgetProxy* proxy = getProxy())
+                {
+                    if (PDFWidgetAnnotationManager* annotationManager = proxy->getAnnotationManager())
+                    {
+                        annotationManager->setSelectedAnnotations(std::vector<PDFObjectReference>{ annotation });
+                    }
+                }
+            }
+        }
+    }
+
+    Q_EMIT getProxy()->repaintNeeded();
+
+    m_isFinishing = false;
+    m_editingPageIndex = -1;
+    m_editingRectangle = QRectF();
+
+    // Deactivation may already be in progress (Escape / tool switch); in that
+    // case isActive() is false and setActive(false) must not be called again.
+    if (isActive())
+    {
+        setActive(false);
+    }
+}
+
+QString PDFCreateFreeTextTool::getVisualText() const
+{
+    return m_textEditWidget ? m_textEditWidget->getText() : QString();
+}
+
+void PDFCreateFreeTextTool::setVisualText(const QString& text)
+{
+    if (!m_isVisualEditing || !m_textEditWidget)
+    {
+        return;
+    }
+
+    m_textEditWidget->setText(text);
+    Q_EMIT getProxy()->repaintNeeded();
+}
+
+void PDFCreateFreeTextTool::updateStyleFromPanel(const QFont& font,
+                                                Qt::Alignment alignment,
+                                                const QColor& color)
+{
+    // Only the four existing PDFFreeTextStyle fields are written; no model
+    // extension and no serialization change (R-17 / SAC-05).
+    m_style.fontFamily = font.family();
+    if (font.pointSizeF() > 0.0)
+    {
+        m_style.fontSize = font.pointSizeF();
+    }
+    m_style.textColor = color.isValid() ? color : QColor(Qt::black);
+    m_style.textAlignment = TextAlignment(Qt::AlignTop | (alignment & Qt::AlignHorizontal_Mask));
+
+    if (m_isVisualEditing)
+    {
+        updateVisualAppearance();
+        Q_EMIT getProxy()->repaintNeeded();
+    }
+}
+
+void PDFCreateFreeTextTool::drawPage(QPainter* painter,
+                                     PDFInteger pageIndex,
+                                     const PDFPrecompiledPage* compiledPage,
+                                     PDFTextLayoutGetter& layoutGetter,
+                                     const QTransform& pagePointToDevicePointMatrix,
+                                     const PDFColorConvertor& convertor,
+                                     QList<PDFRenderError>& errors) const
+{
+    BaseClass::drawPage(painter, pageIndex, compiledPage, layoutGetter,
+                        pagePointToDevicePointMatrix, convertor, errors);
+
+    if (!m_isVisualEditing || !m_textEditWidget || pageIndex != m_editingPageIndex)
+    {
+        return;
+    }
+
+    painter->save();
+
+    AnnotationDrawParameters parameters;
+    parameters.painter = painter;
+    parameters.boundingRectangle = m_editingRectangle;
+    parameters.key.first = PDFAppeareanceStreams::Appearance::Normal;
+    parameters.colorConvertor = convertor;
+    // Same as PDFCreatePCElementTextTool::drawPage(): the preview must respect
+    // the color features (inversion, grayscale, ...) of the widget.
+    PDFRenderer::applyFeaturesToColorConvertor(getProxy()->getFeatures(),
+                                               parameters.colorConvertor);
+
+    painter->setWorldTransform(QTransform(pagePointToDevicePointMatrix), true);
+    m_textEditWidget->draw(parameters, true);
+
+    painter->restore();
+}
+
+void PDFCreateFreeTextTool::shortcutOverrideEvent(QWidget* widget, QKeyEvent* event)
+{
+    if (m_isVisualEditing &&
+        (event->key() == Qt::Key_Enter || event->key() == Qt::Key_Return))
+    {
+        event->accept();
+        return;
+    }
+
+    BaseClass::shortcutOverrideEvent(widget, event);
+}
+
+void PDFCreateFreeTextTool::keyPressEvent(QWidget* widget, QKeyEvent* event)
+{
+    if (m_isVisualEditing &&
+        (event->key() == Qt::Key_Enter || event->key() == Qt::Key_Return))
+    {
+        finishVisualEditing();
+        event->accept();
+        return;
+    }
+
+    BaseClass::keyPressEvent(widget, event);
+}
+
+void PDFCreateFreeTextTool::mousePressEvent(QWidget* widget, QMouseEvent* event)
+{
+    if (m_isVisualEditing)
+    {
+        // Clicking on the page commits the annotation. The text itself is
+        // typed in the modeless inline editor of the Format panel.
+        finishVisualEditing();
+        event->accept();
+        return;
+    }
+
+    BaseClass::mousePressEvent(widget, event);
+}
+
+void PDFCreateFreeTextTool::setActiveImpl(bool active)
+{
+    if (!active && m_isVisualEditing)
+    {
+        // Fallback: a tool switch or Escape must not silently discard the text.
+        finishVisualEditing();
+    }
+
+    BaseClass::setActiveImpl(active);
 }
 
 PDFCreateAnnotationTool::PDFCreateAnnotationTool(PDFDrawWidgetProxy* proxy, QAction* action, QObject* parent) :

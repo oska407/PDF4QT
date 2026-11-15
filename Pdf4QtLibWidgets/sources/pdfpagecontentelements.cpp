@@ -31,6 +31,8 @@
 
 #include <QBuffer>
 #include <QPainter>
+#include <QFontMetricsF>
+#include <QTextLayout>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QSvgRenderer>
@@ -2565,6 +2567,14 @@ void PDFPageContentElementTextBox::drawPage(QPainter* painter,
         font.setPixelSize(qRound(font.pointSizeF()));
     }
 
+    // This function is used both for on screen rendering and for writing the
+    // page content stream. The paint engine that performs the write does not
+    // forward text decoration flags, so the strikeout flag is cleared here and
+    // the line is drawn explicitly further below. What is shown on screen is
+    // then exactly what gets written into the document.
+    const bool strikeOut = font.strikeOut();
+    font.setStrikeOut(false);
+
     PDFPainterStateGuard guard(painter);
     painter->setWorldTransform(QTransform(pagePointToDevicePointMatrix), true);
     painter->setPen(convertor.convert(getPen()));
@@ -2579,9 +2589,65 @@ void PDFPageContentElementTextBox::drawPage(QPainter* painter,
     option.setAlignment(getAlignment());
 
     QRectF textRect(-rect.width() * 0.5, -rect.height() * 0.5, rect.width(), rect.height());
+
+    // Paints the strikeout line for the text block that has just been drawn,
+    // inside the painter transform that is currently active. The text is laid
+    // out line by line the same way drawText() does it, so that a multiline
+    // text box gets one line per text line. The offset is measured from the
+    // baseline, which sits one ascent below the top of a line. In this
+    // coordinate system the local +y axis points downwards for text, which is
+    // why the offset is added. The vertical placement is a static inference
+    // and still has to be confirmed on a running instance.
+    const auto paintStrikeOut = [&](const QRectF& textBlock)
+    {
+        if (!strikeOut || getText().isEmpty())
+        {
+            return;
+        }
+
+        const QString text = getText();
+        const QFontMetricsF metrics(font);
+        const QRectF bounds = painter->boundingRect(textBlock, text, option);
+
+        QTextLayout layout(text, font);
+        layout.setTextOption(option);
+        layout.beginLayout();
+        for (;;)
+        {
+            QTextLine line = layout.createLine();
+            if (!line.isValid())
+            {
+                break;
+            }
+            line.setLineWidth(bounds.width());
+        }
+        layout.endLayout();
+
+        const QPen previousPen = painter->pen();
+        QPen linePen(previousPen);
+        linePen.setWidthF(qMax(1.0, metrics.height() / 14.0));
+        linePen.setStyle(Qt::SolidLine);
+        painter->setPen(linePen);
+
+        for (int index = 0; index < layout.lineCount(); ++index)
+        {
+            const QTextLine line = layout.lineAt(index);
+            const qreal lineY = bounds.top() + line.y() + line.ascent() + metrics.strikeOutPos();
+            const qreal leftX = bounds.left() + line.x();
+            const qreal rightX = leftX + line.naturalTextWidth();
+            if (rightX > leftX)
+            {
+                painter->drawLine(QPointF(leftX, lineY), QPointF(rightX, lineY));
+            }
+        }
+
+        painter->setPen(previousPen);
+    };
+
     if (qFuzzyIsNull(getAngle()))
     {
         painter->drawText(textRect, getText(), option);
+        paintStrikeOut(textRect);
     }
     else
     {
@@ -2634,6 +2700,7 @@ void PDFPageContentElementTextBox::drawPage(QPainter* painter,
 
         textBoundingRect.moveCenter(QPointF(0, 0));
         painter->drawText(textBoundingRect, getText(), option);
+        paintStrikeOut(textBoundingRect);
     }
 }
 

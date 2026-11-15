@@ -68,6 +68,10 @@ add_library(Pdf4QtLibWidgets SHARED
     sources/pdfannotationgeometrydialog.cpp
     sources/pdfpagecontentelements.cpp
     sources/pdfpagecontentelements.h
+    sources/pdfcontextualformatpanel.cpp
+    sources/pdfcontextualformatpanel.h
+    sources/pdfadvancedformatdialog.cpp
+    sources/pdfadvancedformatdialog.h
     sources/pdfitemmodels.cpp
     sources/pdfitemmodels.h
     sources/pdfwidgetformmanager.h

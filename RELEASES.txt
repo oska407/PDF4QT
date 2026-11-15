@@ -1,4 +1,6 @@
 CURRENT:
+ - Issue #432: Contextual right-side Format panel (annotation / text live properties)
+ - Issue #432 (continued): Arrange transforms with anchor alignment, strikeout of text boxes, set-as-default, modeless advanced dialog, annotation lock checkbox
 
 V: 1.7.0.0 8.11.2026
  - Issue #431: Blend2D is crashing on some cropped images

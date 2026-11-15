@@ -29,11 +29,16 @@
 #include "pdfpagecontenteditorprocessor.h"
 
 #include <QObject>
+#include <QPointer>
+#include <QString>
+#include <QFont>
+#include <QColor>
 #include <vector>
 
 namespace pdf
 {
 class PDFPageContentEditorWidget;
+class PDFContextualFormatPanel;
 }
 
 namespace pdfplugin
@@ -158,6 +163,30 @@ private:
     void updateDockWidget();
     void updateEditedPages();
 
+    /// Connects the persistent Format panel (created by the main window) to
+    /// this plugin and registers m_scene for the lifetime of the edit session.
+    void registerFormatPanel();
+    void unregisterFormatPanel();
+
+    /// R-20: promotes the current panel values to the default style of the
+    /// element creation tool. The selected elements are never modified here
+    /// (AC-14), which is why the existing onFontChanged / onPenChanged slots,
+    /// that write the selection first, cannot be reused.
+    void onSetAsDefaultRequested(const QFont& font, const QColor& color, Qt::Alignment alignment);
+
+    /// R-20, annotation side: stores the colour as the persisted style of the
+    /// active annotation tool (KI-06: no opacity is involved).
+    void onAnnotationDefaultStyleRequested(const QColor& color);
+
+    /// Boundaries of a continuous property edit. While active, createUndoStep()
+    /// is suppressed and one SceneState (the state after the interaction) is
+    /// pushed when the interaction finishes.
+    void onContinuousEditStarted();
+    void onContinuousEditFinished();
+
+    /// Writes the text of the modeless inline editor into the selected element.
+    void onInlineTextChanged(const QString& text);
+
     /// Clears both local undo and redo stacks.
     void clearUndoRedo();
 
@@ -201,6 +230,11 @@ private:
     std::vector<pdf::PDFPageContentScene::SceneState> m_undoStates;
     /// Timeline of scene snapshots used by the local redo action.
     std::vector<pdf::PDFPageContentScene::SceneState> m_redoStates;
+
+    /// Non-owning reference to the persistent Format panel owned by the main window.
+    QPointer<pdf::PDFContextualFormatPanel> m_formatPanel;
+    /// True between onContinuousEditStarted() and onContinuousEditFinished().
+    bool m_isContinuousEditInProgress = false;
 };
 
 }   // namespace pdfplugin

@@ -37,6 +37,8 @@ class QLineEdit;
 namespace pdf
 {
 
+class PDFAnnotationStyleManager;
+
 /// Base class for various widget tools (for example, searching, text selection,
 /// screenshots, zoom tool etc.). Each tool can have subtools (for example,
 /// screenshot tool is picking screenshot rectangle).
@@ -67,6 +69,13 @@ public:
 
     /// Returns action for activating/deactivating this tool
     QAction* getAction() const { return m_action; }
+
+    /// Returns the manager of the persisted annotation style, or nullptr if this
+    /// tool does not create annotations with a stored style. The context format
+    /// panel uses it to promote the look of a selected annotation to the default
+    /// style of the tool (R-20). Tools without such a manager keep the nullptr
+    /// implementation, tools that create styled annotations override it.
+    virtual PDFAnnotationStyleManager* getAnnotationStyleManager() const { return nullptr; }
 
     /// Handles shortcut override event from widget, over which tool operates
     /// \param widget Widget, over which tool operates

@@ -302,6 +302,24 @@ public:
     /// \param orientation Orientation (on the screen)
     void distributeSelectedAnnotations(Qt::Orientation orientation);
 
+    /// Returns the anchor of the current selection - the annotation, which was
+    /// selected as the last one. An invalid reference is returned, if nothing
+    /// is selected.
+    PDFObjectReference getLastSelectedAnnotation() const;
+
+    /// Aligns the selected annotations of each page to the anchor (the last
+    /// selected annotation) instead of the frame of the whole selection. A page,
+    /// which does not contain the anchor, keeps the frame of its own selection.
+    /// If nothing or a single annotation only is selected, the behavior of
+    /// alignSelectedAnnotations() is used.
+    /// \param alignment Alignment
+    void alignSelectedAnnotationsToAnchor(Alignment alignment);
+
+    /// Centers the selected annotations on their page. Every page is centered
+    /// separately (the pages can have different sizes), all pages are modified
+    /// in a single step, so a single undo reverts the whole operation.
+    void centerSelectedAnnotationsOnPage();
+
     /// Sets the rectangle of the annotation (position and size). The geometry of
     /// the annotation (its points) is transformed together with the rectangle. If the
     /// annotation cannot be resized, then it is just moved to the center of the rectangle.
@@ -380,6 +398,54 @@ public:
 
     /// Sets the width of the border (line) of the selected annotations, which have a border
     void setSelectedAnnotationsBorderWidth(PDFReal width);
+
+    /// Returns the common lock state of the selected annotations, or
+    /// std::nullopt if there is no selection or the annotations have different
+    /// states. Reads the "F" flag of the same annotations which are written by
+    /// setSelectedAnnotationsLocked(). Read only, emits nothing.
+    std::optional<bool> getSelectedAnnotationsLocked() const;
+
+    /// Locks / unlocks the selected annotations by setting or clearing the
+    /// /F Locked flag (0x0080). This method deliberately does NOT use
+    /// modifySelectedAnnotations(): that loop filters its targets through
+    /// canModifyAnnotation(), which rejects already locked annotations, so
+    /// unlocking through it would silently do nothing.
+    void setSelectedAnnotationsLocked(bool locked);
+
+    /// Returns the common color of the selected annotations, or std::nullopt
+    /// if there is no selection, a color is not defined, or the selected
+    /// annotations have different colors. Reads the same "C" dictionary entry
+    /// which setSelectedAnnotationsColor() writes. Read only, emits nothing.
+    std::optional<QColor> getSelectedAnnotationsColor() const;
+
+    /// Returns the common opacity [0.0, 1.0] of the selected annotations, or
+    /// std::nullopt if there is no selection or the values differ. Reads the
+    /// same "CA" dictionary entry which setSelectedAnnotationsOpacity()
+    /// writes. Read only, emits nothing.
+    std::optional<PDFReal> getSelectedAnnotationsOpacity() const;
+
+    /// Returns true, if the selection is not empty and every selected
+    /// annotation is a free text annotation (/Subtype /FreeText). Read only,
+    /// emits nothing, does not modify the document.
+    bool hasSelectedFreeTextAnnotations() const;
+
+    /// Returns the common "Contents" entry of the selected annotations, if all
+    /// selected annotations are free text annotations with the same text.
+    /// Returns std::nullopt if there is no selection, a selected annotation is
+    /// not a free text annotation, or the texts differ. Read only, emits
+    /// nothing, does not modify the document.
+    std::optional<QString> getSelectedFreeTextContents() const;
+
+    /// Sets the "Contents" entry of all selected free text annotations and
+    /// rebuilds their appearance streams (the generic appearance stream
+    /// builder re-renders the text from "Contents" and "DA"), so the change
+    /// is visible immediately. Annotations with the same text are skipped, so
+    /// no empty modification is created. The modification is announced by
+    /// documentModified() through the standard modification chain of
+    /// modifySelectedAnnotations(), so it is undoable.
+    /// \param text New text of the annotations
+    /// \returns True, if at least one annotation had a different text
+    bool setSelectedFreeTextContents(const QString& text);
 
     /// Returns the index of the point of the selected annotation,
     /// which is edited from the keyboard, or -1

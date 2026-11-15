@@ -535,6 +535,308 @@ void PDFWidgetAnnotationManager::setSelectedAnnotationsOpacity(PDFReal opacity)
     });
 }
 
+std::optional<bool> PDFWidgetAnnotationManager::getSelectedAnnotationsLocked() const
+{
+    if (!m_document || !hasSelection())
+    {
+        return std::nullopt;
+    }
+
+    std::optional<bool> commonLocked;
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        const PageAnnotation* pageAnnotation = findPageAnnotation(item.pageIndex, item.annotation);
+        if (!pageAnnotation || !pageAnnotation->annotation)
+        {
+            return std::nullopt;
+        }
+
+        const bool locked = pageAnnotation->annotation->getFlags().testFlag(PDFAnnotation::Flag::Locked);
+        if (!commonLocked.has_value())
+        {
+            commonLocked = locked;
+        }
+        else if (commonLocked.value() != locked)
+        {
+            return std::nullopt;
+        }
+    }
+
+    return commonLocked;
+}
+
+void PDFWidgetAnnotationManager::setSelectedAnnotationsLocked(bool locked)
+{
+    // Deliberately not modifySelectedAnnotations(): its loop filters the targets
+    // through canModifyAnnotation(), which rejects already locked annotations, so
+    // the unlock direction would silently do nothing. The loop below keeps the
+    // same single modifier commit, but without that filter.
+    if (!m_document || !hasSelection() || !isModificationAllowed())
+    {
+        return;
+    }
+
+    PDFDocumentModifier modifier(m_document);
+    modifier.markAnnotationsChanged();
+
+    bool isModified = false;
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        const PageAnnotation* pageAnnotation = findPageAnnotation(item.pageIndex, item.annotation);
+        if (pageAnnotation && pageAnnotation->annotation)
+        {
+            const PDFObjectReference annotation = pageAnnotation->annotation->getSelfReference();
+
+            PDFInteger flags = pageAnnotation->annotation->getFlags();
+            if (locked)
+            {
+                flags |= PDFAnnotation::Flag::Locked;
+            }
+            else
+            {
+                flags &= ~PDFAnnotation::Flag::Locked;
+            }
+
+            PDFObjectFactory factory;
+            factory.beginDictionary();
+            factory.beginDictionaryItem("F");
+            factory << flags;
+            factory.endDictionaryItem();
+            factory.endDictionary();
+
+            PDFDocumentBuilder* builder = modifier.getBuilder();
+            builder->mergeTo(annotation, factory.takeObject());
+            builder->updateAnnotationAppearanceStreams(annotation);
+            isModified = true;
+        }
+    }
+
+    if (isModified && modifier.finalize())
+    {
+        Q_EMIT documentModified(PDFModifiedDocument(modifier.getDocument(), nullptr, modifier.getFlags()));
+    }
+}
+
+std::optional<QColor> PDFWidgetAnnotationManager::getSelectedAnnotationsColor() const
+{
+    if (!m_document || !hasSelection())
+    {
+        return std::nullopt;
+    }
+
+    std::optional<QColor> commonColor;
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        const PageAnnotation* pageAnnotation = findPageAnnotation(item.pageIndex, item.annotation);
+        if (!pageAnnotation || !pageAnnotation->annotation)
+        {
+            return std::nullopt;
+        }
+
+        const std::vector<PDFReal>& components = pageAnnotation->annotation->getColor();
+        if (components.empty())
+        {
+            // The "C" entry is missing; do not mistake it for black.
+            return std::nullopt;
+        }
+
+        // getDrawColorFromAnnotationColor() is the exact inverse of
+        // WrapAnnotationColor(), which setSelectedAnnotationsColor() writes
+        // into the "C" entry. Opacity 1.0 keeps the color itself untouched.
+        const QColor color = PDFAnnotation::getDrawColorFromAnnotationColor(components, 1.0);
+        if (!commonColor.has_value())
+        {
+            commonColor = color;
+        }
+        else if (commonColor.value().toRgb() != color.toRgb())
+        {
+            return std::nullopt;
+        }
+    }
+
+    return commonColor;
+}
+
+std::optional<PDFReal> PDFWidgetAnnotationManager::getSelectedAnnotationsOpacity() const
+{
+    if (!m_document || !hasSelection())
+    {
+        return std::nullopt;
+    }
+
+    std::optional<PDFReal> commonOpacity;
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        const PageAnnotation* pageAnnotation = findPageAnnotation(item.pageIndex, item.annotation);
+        if (!pageAnnotation || !pageAnnotation->annotation)
+        {
+            return std::nullopt;
+        }
+
+        // setSelectedAnnotationsOpacity() writes the same value into "CA"
+        // (stroke opacity) and "ca" (fill opacity). An annotation created by
+        // another application can have only "ca" (a translucent highlight),
+        // and PDFAnnotation then loads "CA" as 1.0 - such an annotation must
+        // not be reported as fully opaque.
+        const PDFReal strokeOpacity = qBound(0.0,
+                                             pageAnnotation->annotation->getStrokeOpacity(),
+                                             1.0);
+        const PDFReal fillOpacity = qBound(0.0,
+                                           pageAnnotation->annotation->getFillOpacity(),
+                                           1.0);
+
+        PDFReal opacity = strokeOpacity;
+        if (!qFuzzyCompare(strokeOpacity + 1.0, fillOpacity + 1.0))
+        {
+            if (!qFuzzyCompare(strokeOpacity + 1.0, 2.0))
+            {
+                // Both entries are set and they differ, so the opacity of the
+                // annotation is not unambiguous.
+                return std::nullopt;
+            }
+
+            // "CA" holds its default value, so the fill opacity is the value
+            // really stored in the document.
+            opacity = fillOpacity;
+        }
+
+        if (!commonOpacity.has_value())
+        {
+            commonOpacity = opacity;
+        }
+        else if (!qFuzzyCompare(commonOpacity.value() + 1.0, opacity + 1.0))
+        {
+            return std::nullopt;
+        }
+    }
+
+    return commonOpacity;
+}
+
+bool PDFWidgetAnnotationManager::hasSelectedFreeTextAnnotations() const
+{
+    if (!m_document || !hasSelection())
+    {
+        return false;
+    }
+
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        const PageAnnotation* pageAnnotation = findPageAnnotation(item.pageIndex, item.annotation);
+        if (!pageAnnotation || !pageAnnotation->annotation)
+        {
+            return false;
+        }
+
+        // The subtype is decided by the class of the parsed annotation, the
+        // "Subtype" name itself is not interpreted here.
+        if (!dynamic_cast<const PDFFreeTextAnnotation*>(pageAnnotation->annotation.data()))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::optional<QString> PDFWidgetAnnotationManager::getSelectedFreeTextContents() const
+{
+    if (!m_document || !hasSelection())
+    {
+        return std::nullopt;
+    }
+
+    std::optional<QString> commonContents;
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        const PageAnnotation* pageAnnotation = findPageAnnotation(item.pageIndex, item.annotation);
+        if (!pageAnnotation || !pageAnnotation->annotation)
+        {
+            return std::nullopt;
+        }
+
+        const PDFFreeTextAnnotation* freeTextAnnotation =
+            dynamic_cast<const PDFFreeTextAnnotation*>(pageAnnotation->annotation.data());
+        if (!freeTextAnnotation)
+        {
+            return std::nullopt;
+        }
+
+        const QString& contents = freeTextAnnotation->getContents();
+        if (!commonContents.has_value())
+        {
+            commonContents = contents;
+        }
+        else if (commonContents.value() != contents)
+        {
+            return std::nullopt;
+        }
+    }
+
+    return commonContents;
+}
+
+bool PDFWidgetAnnotationManager::setSelectedFreeTextContents(const QString& text)
+{
+    if (!m_document || !hasSelection())
+    {
+        return false;
+    }
+
+    // modifySelectedAnnotations() reports no modification result, so it is
+    // checked first, whether at least one annotation really changes.
+    bool isModified = false;
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        const PageAnnotation* pageAnnotation = findPageAnnotation(item.pageIndex, item.annotation);
+        if (pageAnnotation && pageAnnotation->annotation &&
+            canModifyAnnotation(*pageAnnotation) &&
+            dynamic_cast<const PDFFreeTextAnnotation*>(pageAnnotation->annotation.data()) &&
+            pageAnnotation->annotation->getContents() != text)
+        {
+            isModified = true;
+            break;
+        }
+    }
+
+    if (!isModified)
+    {
+        return false;
+    }
+
+    modifySelectedAnnotations([&text](PDFDocumentBuilder* builder, const PageAnnotation& pageAnnotation)
+    {
+        const PDFFreeTextAnnotation* freeTextAnnotation =
+            dynamic_cast<const PDFFreeTextAnnotation*>(pageAnnotation.annotation.data());
+        if (!freeTextAnnotation || freeTextAnnotation->getContents() == text)
+        {
+            return false;
+        }
+
+        const PDFObjectReference annotation = pageAnnotation.annotation->getSelfReference();
+
+        PDFObjectFactory factory;
+        factory.beginDictionary();
+        factory.beginDictionaryItem("Contents");
+        factory << text;
+        factory.endDictionaryItem();
+        factory.endDictionary();
+        builder->mergeTo(annotation, factory.takeObject());
+
+        // The appearance stream of a free text annotation is rendered from
+        // "Contents" and "DA" (see PDFFreeTextAnnotation::draw) by the generic
+        // appearance stream builder, which is the same path
+        // createAnnotationFreeText() uses, so no core change is needed. The
+        // bounding rectangle is the annotation rectangle, so "/Rect" is not
+        // changed here (the text is not auto-resized).
+        builder->updateAnnotationAppearanceStreams(annotation);
+
+        return true;
+    });
+
+    return true;
+}
+
 void PDFWidgetAnnotationManager::setSelectedAnnotationsBorderWidth(PDFReal width)
 {
     width = qMax(0.0, width);
@@ -1045,6 +1347,157 @@ void PDFWidgetAnnotationManager::distributeSelectedAnnotations(Qt::Orientation o
 
         const qreal offset = position - getStart(rectangle);
         return isHorizontal ? QPointF(offset, 0.0) : QPointF(0.0, offset);
+    });
+}
+
+PDFObjectReference PDFWidgetAnnotationManager::getLastSelectedAnnotation() const
+{
+    // The selection is an ordered vector, so the last item is the annotation the
+    // user selected as the last one (the anchor of the alignment).
+    return m_selection.empty() ? PDFObjectReference() : m_selection.back().annotation;
+}
+
+void PDFWidgetAnnotationManager::alignSelectedAnnotationsToAnchor(Alignment alignment)
+{
+    const PDFObjectReference anchor = getLastSelectedAnnotation();
+    if (!anchor.isValid() || m_selection.size() < 2)
+    {
+        // Nothing to align to - the behavior must stay the same as before.
+        alignSelectedAnnotations(alignment);
+        return;
+    }
+
+    if (!m_document || !isModificationAllowed())
+    {
+        return;
+    }
+
+    std::vector<PDFInteger> pages;
+    for (const SelectedAnnotation& item : m_selection)
+    {
+        if (std::find(pages.cbegin(), pages.cend(), item.pageIndex) == pages.cend())
+        {
+            pages.push_back(item.pageIndex);
+        }
+    }
+
+    PDFDocumentModifier modifier(m_document);
+    modifier.markAnnotationsChanged();
+
+    bool isModified = false;
+    for (const PDFInteger pageIndex : pages)
+    {
+        bool invertible = false;
+        const QTransform pageToDevice = getPageToDeviceMatrix(pageIndex);
+        const QTransform deviceToPage = pageToDevice.inverted(&invertible);
+        const std::vector<const PageAnnotation*> annotations = getSelectedAnnotations(pageIndex, true);
+        if (!invertible || annotations.size() < 2)
+        {
+            continue;
+        }
+
+        // The frame is the rectangle of the anchor, not the united rectangle of
+        // the whole selection (that is the only difference to the alignment of
+        // the frame implemented by alignSelectedAnnotations()).
+        QRectF frame;
+        std::vector<QRectF> rectangles;
+        size_t anchorIndex = 0;
+        bool anchorFound = false;
+        for (size_t i = 0; i < annotations.size(); ++i)
+        {
+            const QTransform matrix = getAnnotationToDeviceMatrix(*annotations[i], pageIndex, pageToDevice);
+            rectangles.push_back(matrix.mapRect(annotations[i]->annotation->getRectangle().normalized()).normalized());
+            if (annotations[i]->annotation->getSelfReference() == anchor)
+            {
+                anchorIndex = i;
+                anchorFound = true;
+            }
+        }
+
+        if (anchorFound)
+        {
+            frame = rectangles[anchorIndex];
+        }
+        else
+        {
+            // The anchor is on another page, so this page keeps the frame of its
+            // own selection (the behavior of alignSelectedAnnotations()).
+            for (const QRectF& rectangle : rectangles)
+            {
+                frame = frame.united(rectangle);
+            }
+        }
+
+        for (size_t i = 0; i < annotations.size(); ++i)
+        {
+            const QRectF& rectangle = rectangles[i];
+            QPointF deviceOffset(0.0, 0.0);
+            switch (alignment)
+            {
+                case Alignment::Left:
+                    deviceOffset = QPointF(frame.left() - rectangle.left(), 0.0);
+                    break;
+                case Alignment::HorizontalCenter:
+                    deviceOffset = QPointF(frame.center().x() - rectangle.center().x(), 0.0);
+                    break;
+                case Alignment::Right:
+                    deviceOffset = QPointF(frame.right() - rectangle.right(), 0.0);
+                    break;
+                case Alignment::Top:
+                    deviceOffset = QPointF(0.0, frame.top() - rectangle.top());
+                    break;
+                case Alignment::VerticalCenter:
+                    deviceOffset = QPointF(0.0, frame.center().y() - rectangle.center().y());
+                    break;
+                case Alignment::Bottom:
+                    deviceOffset = QPointF(0.0, frame.bottom() - rectangle.bottom());
+                    break;
+            }
+
+            const QPointF pageOffset = deviceToPage.map(deviceOffset) - deviceToPage.map(QPointF(0.0, 0.0));
+            if (qFuzzyIsNull(pageOffset.x()) && qFuzzyIsNull(pageOffset.y()))
+            {
+                continue;
+            }
+
+            const QTransform translation = QTransform::fromTranslate(pageOffset.x(), pageOffset.y());
+            isModified = PDFAnnotationManipulator::transformAnnotation(modifier.getBuilder(), annotations[i]->annotation->getSelfReference(), translation) || isModified;
+        }
+    }
+
+    // A single modification for all pages / annotations - one undo step.
+    if (isModified && modifier.finalize())
+    {
+        Q_EMIT documentModified(PDFModifiedDocument(modifier.getDocument(), nullptr, modifier.getFlags()));
+    }
+}
+
+void PDFWidgetAnnotationManager::centerSelectedAnnotationsOnPage()
+{
+    // The annotations can be selected on several pages and every page has its own
+    // size, so the offset is computed for each page separately. The
+    // whole operation is one modification of the document (one undo step).
+    transformSelectedAnnotations([this](const QRectF& boundingRectangle, PDFInteger pageIndex)
+    {
+        if (!m_document || pageIndex < 0)
+        {
+            return QTransform();
+        }
+
+        const PDFCatalog* catalog = m_document->getCatalog();
+        if (size_t(pageIndex) >= catalog->getPageCount())
+        {
+            return QTransform();
+        }
+
+        const QRectF mediaBox = catalog->getPage(pageIndex)->getMediaBox();
+        if (!mediaBox.isValid())
+        {
+            return QTransform();
+        }
+
+        const QPointF offset = mediaBox.center() - boundingRectangle.center();
+        return QTransform::fromTranslate(offset.x(), offset.y());
     });
 }
 

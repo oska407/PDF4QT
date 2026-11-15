@@ -63,6 +63,7 @@ namespace pdf
 {
 class PDFAction;
 class PDFWidget;
+class PDFContextualFormatPanel;
 class PDFDocument;
 class PDFOptionalContentTreeItemModel;
 }
@@ -120,6 +121,7 @@ private:
     QDockWidget* m_sidebarDockWidget;
     PDFAdvancedFindWidget* m_advancedFindWidget;
     QDockWidget* m_advancedFindDockWidget;
+    pdf::PDFContextualFormatPanel* m_formatPanelDock = nullptr;
     QSpinBox* m_pageNumberSpinBox;
     QLabel* m_pageNumberLabel;
     QDoubleSpinBox* m_pageZoomSpinBox;

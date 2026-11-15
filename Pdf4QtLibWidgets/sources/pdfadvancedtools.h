@@ -33,6 +33,8 @@ class QActionGroup;
 namespace pdf
 {
 
+class PDFTextEditPseudowidget;
+
 /// Tool that creates 'sticky note' annotations. Multiple types of sticky
 /// notes are available, user can select a type of sticky note. When
 /// user select a point, popup window appears and user can enter a text.
@@ -137,6 +139,10 @@ private:
 };
 
 /// Tool that creates free text note without callout line.
+///
+/// T09 / R-05 downgrade A: the text is typed into the modeless inline editor of
+/// the contextual Format panel, and a WYSIWYG preview is drawn directly on the
+/// page. The annotation is created once, when the visual editing is finished.
 class PDF4QTLIBWIDGETSSHARED_EXPORT PDFCreateFreeTextTool : public PDFCreateAnnotationTool
 {
     Q_OBJECT
@@ -146,15 +152,59 @@ private:
 
 public:
     explicit PDFCreateFreeTextTool(PDFDrawWidgetProxy* proxy, PDFToolManager* toolManager, QAction* action, QObject* parent);
+    virtual ~PDFCreateFreeTextTool() override;
+
+    /// Returns true while an on-page text preview is being displayed.
+    bool isVisualEditing() const { return m_isVisualEditing; }
+
+    /// Returns the text currently displayed on the page.
+    QString getVisualText() const;
+
+    /// Returns a copy of the four existing PDFFreeTextStyle fields.
+    PDFFreeTextStyle getVisualStyle() const { return m_style; }
+
+    /// Updates the on-page preview text (no dialog, no confirmation button).
+    void setVisualText(const QString& text);
+
+    /// Applies the style chosen in the contextual Format panel to the existing
+    /// m_style fields and refreshes the page preview immediately.
+    void updateStyleFromPanel(const QFont& font, Qt::Alignment alignment, const QColor& color);
+
+    virtual void drawPage(QPainter* painter,
+                          PDFInteger pageIndex,
+                          const PDFPrecompiledPage* compiledPage,
+                          PDFTextLayoutGetter& layoutGetter,
+                          const QTransform& pagePointToDevicePointMatrix,
+                          const PDFColorConvertor& convertor,
+                          QList<PDFRenderError>& errors) const override;
+
+    virtual void shortcutOverrideEvent(QWidget* widget, QKeyEvent* event) override;
+    virtual void keyPressEvent(QWidget* widget, QKeyEvent* event) override;
+    virtual void mousePressEvent(QWidget* widget, QMouseEvent* event) override;
+
+protected:
+    virtual void setActiveImpl(bool active) override;
 
 private:
+    /// Legacy modal configuration dialog. Kept as a compatibility entry point
+    /// only; onRectanglePicked() does not call it any more (R-19 / P2).
     bool configureFreeText(QString& text);
     void onRectanglePicked(pdf::PDFInteger pageIndex, QRectF pageRectangle);
+
+    void startVisualEditing(pdf::PDFInteger pageIndex, QRectF pageRectangle);
+    void finishVisualEditing();
+    void updateVisualAppearance();
 
     PDFToolManager* m_toolManager;
     PDFPickTool* m_pickTool;
     PDFFreeTextStyle m_style;
     bool m_autoResizeToContents = true;
+
+    PDFTextEditPseudowidget* m_textEditWidget = nullptr;
+    PDFInteger m_editingPageIndex = -1;
+    QRectF m_editingRectangle;
+    bool m_isVisualEditing = false;
+    bool m_isFinishing = false;
 };
 
 /// Tool that creates line/polyline/polygon annotations.
@@ -166,6 +216,7 @@ private:
     using BaseClass = PDFCreateAnnotationTool;
 
 public:
+    virtual PDFAnnotationStyleManager* getAnnotationStyleManager() const override { return m_styleManager; }
     enum class Type
     {
         Line,
@@ -223,6 +274,7 @@ private:
     using BaseClass = PDFCreateAnnotationTool;
 
 public:
+    virtual PDFAnnotationStyleManager* getAnnotationStyleManager() const override { return m_styleManager; }
     explicit PDFCreateEllipseTool(PDFDrawWidgetProxy* proxy, PDFToolManager* toolManager, QAction* action, QObject* parent);
 
     virtual void drawPage(QPainter* painter,
@@ -261,6 +313,7 @@ private:
     using BaseClass = PDFCreateAnnotationTool;
 
 public:
+    virtual PDFAnnotationStyleManager* getAnnotationStyleManager() const override { return m_styleManager; }
     explicit PDFCreateFreehandCurveTool(PDFDrawWidgetProxy* proxy, PDFToolManager* toolManager, QAction* action, QObject* parent);
 
     virtual void drawPage(QPainter* painter, PDFInteger pageIndex,
@@ -335,6 +388,7 @@ private:
     using BaseClass = PDFWidgetTool;
 
 public:
+    virtual PDFAnnotationStyleManager* getAnnotationStyleManager() const override { return m_styleManager; }
 
     /// Creates new highlight text tool
     /// \param proxy Proxy
@@ -398,6 +452,7 @@ private:
     using BaseClass = PDFCreateAnnotationTool;
 
 public:
+    virtual PDFAnnotationStyleManager* getAnnotationStyleManager() const override { return m_styleManager; }
     explicit PDFCreateRedactRectangleTool(PDFDrawWidgetProxy* proxy, PDFToolManager* toolManager, QAction* action, QObject* parent);
 
     /// Returns the color to be used for newly created redaction annotations.
@@ -529,6 +584,7 @@ private:
     using BaseClass = PDFWidgetTool;
 
 public:
+    virtual PDFAnnotationStyleManager* getAnnotationStyleManager() const override { return m_styleManager; }
     explicit PDFCreateRedactTextTool(PDFDrawWidgetProxy* proxy, PDFToolManager* toolManager, QAction* action, QObject* parent);
 
     virtual void drawPage(QPainter* painter,

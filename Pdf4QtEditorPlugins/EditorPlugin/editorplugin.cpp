@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "editorplugin.h"
+#include "pdfcontextualformatpanel.h"
 #include "pdfdrawwidget.h"
 #include "pdfutils.h"
 #include "pdfpagecontenteditorwidget.h"
@@ -29,6 +30,10 @@
 #include "pdfcertificatemanagerdialog.h"
 #include "pdfdocumentwriter.h"
 #include "pdfpagecontenteditorprocessor.h"
+#include "pdfpagecontenteditortools.h"
+#include "pdfwidgettool.h"
+#include "pdfannotationstyle.h"
+#include "pdfadvancedtools.h"
 #include "pdfpagecontenteditorcontentstreambuilder.h"
 #include "pdfstreamfilters.h"
 #include "pdfoptimizer.h"
@@ -36,10 +41,12 @@
 #include <QAction>
 #include <QToolButton>
 #include <QMainWindow>
+#include <QWidget>
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QSettings>
 #include <QCoreApplication>
+#include <memory>
 
 namespace pdfplugin
 {
@@ -632,39 +639,13 @@ void EditorPlugin::onSceneEditElement(const std::set<pdf::PDFInteger>& elements)
         return;
     }
 
-    pdf::PDFPageContentElement* element = nullptr;
-    for (pdf::PDFInteger id : elements)
-    {
-        element = m_scene.getElementById(id);
-        if (element)
-        {
-            break;
-        }
-    }
-
-    if (!element)
-    {
-        return;
-    }
-
-    std::unique_ptr<pdf::PDFPageContentElement> clonedElement(element->clone());
-    if (pdf::PDFPageContentEditorStyleSettings::showEditElementStyleDialog(m_dataExchangeInterface->getMainWindow(), clonedElement.get()))
-    {
-        if (clonedElement->asElementEdited())
-        {
-            pdf::PDFPageContentElementEdited* editedElement = dynamic_cast<pdf::PDFPageContentElementEdited*>(clonedElement.get());
-            if (editedElement->getElement()->asText())
-            {
-                if (!updateTextElement(editedElement))
-                {
-                    return;
-                }
-            }
-        }
-
-        m_scene.replaceElement(clonedElement.release());
-        updateGraphics();
-    }
+    // T08 / R-06: the modal "Edit Item" dialog is no longer on the main path.
+    // The request only selects the element; the persistent Format panel then
+    // shows its values in the inline modeless QTextEdit and writes them back
+    // through onInlineTextChanged(). The panel is notified through
+    // PDFPageContentScene::selectionChanged, so no direct refresh is requested
+    // here - the panel coalesces the update into a single event loop turn.
+    m_scene.setSelectedElementIds(elements);
 }
 
 void EditorPlugin::onSceneEditSingleElement(pdf::PDFInteger elementId)
@@ -674,6 +655,33 @@ void EditorPlugin::onSceneEditSingleElement(pdf::PDFInteger elementId)
 
 void EditorPlugin::onPenChanged(const QPen& pen)
 {
+    const std::set<pdf::PDFInteger> selectedIds = m_scene.getSelectedElementIds();
+    if (!selectedIds.empty())
+    {
+        std::vector<pdf::PDFPageContentElement*> replacements;
+        for (pdf::PDFInteger id : selectedIds)
+        {
+            if (pdf::PDFPageContentElement* element = m_scene.getElementById(id))
+            {
+                std::unique_ptr<pdf::PDFPageContentElement> clonedElement(element->clone());
+                if (pdf::PDFPageContentStyledElement* styled =
+                        dynamic_cast<pdf::PDFPageContentStyledElement*>(clonedElement.get()))
+                {
+                    styled->setPen(pen);
+                    replacements.push_back(clonedElement.release());
+                }
+            }
+        }
+        if (!replacements.empty())
+        {
+            m_scene.replaceElements(std::move(replacements));
+            updateGraphics();
+        }
+        // Never fall back to the active tool setter: tool defaults must not be
+        // polluted by the properties of a selected element (AC-13 / SAC-06).
+        return;
+    }
+
     if (pdf::PDFCreatePCElementTool* activeTool = qobject_cast<pdf::PDFCreatePCElementTool*>(getActiveTool()))
     {
         activeTool->setPen(pen);
@@ -682,6 +690,31 @@ void EditorPlugin::onPenChanged(const QPen& pen)
 
 void EditorPlugin::onBrushChanged(const QBrush& brush)
 {
+    const std::set<pdf::PDFInteger> selectedIds = m_scene.getSelectedElementIds();
+    if (!selectedIds.empty())
+    {
+        std::vector<pdf::PDFPageContentElement*> replacements;
+        for (pdf::PDFInteger id : selectedIds)
+        {
+            if (pdf::PDFPageContentElement* element = m_scene.getElementById(id))
+            {
+                std::unique_ptr<pdf::PDFPageContentElement> clonedElement(element->clone());
+                if (pdf::PDFPageContentStyledElement* styled =
+                        dynamic_cast<pdf::PDFPageContentStyledElement*>(clonedElement.get()))
+                {
+                    styled->setBrush(brush);
+                    replacements.push_back(clonedElement.release());
+                }
+            }
+        }
+        if (!replacements.empty())
+        {
+            m_scene.replaceElements(std::move(replacements));
+            updateGraphics();
+        }
+        return;
+    }
+
     if (pdf::PDFCreatePCElementTool* activeTool = qobject_cast<pdf::PDFCreatePCElementTool*>(getActiveTool()))
     {
         activeTool->setBrush(brush);
@@ -690,6 +723,31 @@ void EditorPlugin::onBrushChanged(const QBrush& brush)
 
 void EditorPlugin::onFontChanged(const QFont& font)
 {
+    const std::set<pdf::PDFInteger> selectedIds = m_scene.getSelectedElementIds();
+    if (!selectedIds.empty())
+    {
+        std::vector<pdf::PDFPageContentElement*> replacements;
+        for (pdf::PDFInteger id : selectedIds)
+        {
+            if (pdf::PDFPageContentElement* element = m_scene.getElementById(id))
+            {
+                std::unique_ptr<pdf::PDFPageContentElement> clonedElement(element->clone());
+                if (pdf::PDFPageContentElementTextBox* textBox =
+                        dynamic_cast<pdf::PDFPageContentElementTextBox*>(clonedElement.get()))
+                {
+                    textBox->setFont(font);
+                    replacements.push_back(clonedElement.release());
+                }
+            }
+        }
+        if (!replacements.empty())
+        {
+            m_scene.replaceElements(std::move(replacements));
+            updateGraphics();
+        }
+        return;
+    }
+
     if (pdf::PDFCreatePCElementTool* activeTool = qobject_cast<pdf::PDFCreatePCElementTool*>(getActiveTool()))
     {
         activeTool->setFont(font);
@@ -698,6 +756,31 @@ void EditorPlugin::onFontChanged(const QFont& font)
 
 void EditorPlugin::onAlignmentChanged(Qt::Alignment alignment)
 {
+    const std::set<pdf::PDFInteger> selectedIds = m_scene.getSelectedElementIds();
+    if (!selectedIds.empty())
+    {
+        std::vector<pdf::PDFPageContentElement*> replacements;
+        for (pdf::PDFInteger id : selectedIds)
+        {
+            if (pdf::PDFPageContentElement* element = m_scene.getElementById(id))
+            {
+                std::unique_ptr<pdf::PDFPageContentElement> clonedElement(element->clone());
+                if (pdf::PDFPageContentElementTextBox* textBox =
+                        dynamic_cast<pdf::PDFPageContentElementTextBox*>(clonedElement.get()))
+                {
+                    textBox->setAlignment(alignment);
+                    replacements.push_back(clonedElement.release());
+                }
+            }
+        }
+        if (!replacements.empty())
+        {
+            m_scene.replaceElements(std::move(replacements));
+            updateGraphics();
+        }
+        return;
+    }
+
     if (pdf::PDFCreatePCElementTool* activeTool = qobject_cast<pdf::PDFCreatePCElementTool*>(getActiveTool()))
     {
         activeTool->setAlignment(alignment);
@@ -706,6 +789,31 @@ void EditorPlugin::onAlignmentChanged(Qt::Alignment alignment)
 
 void EditorPlugin::onTextAngleChanged(pdf::PDFReal angle)
 {
+    const std::set<pdf::PDFInteger> selectedIds = m_scene.getSelectedElementIds();
+    if (!selectedIds.empty())
+    {
+        std::vector<pdf::PDFPageContentElement*> replacements;
+        for (pdf::PDFInteger id : selectedIds)
+        {
+            if (pdf::PDFPageContentElement* element = m_scene.getElementById(id))
+            {
+                std::unique_ptr<pdf::PDFPageContentElement> clonedElement(element->clone());
+                if (pdf::PDFPageContentElementTextBox* textBox =
+                        dynamic_cast<pdf::PDFPageContentElementTextBox*>(clonedElement.get()))
+                {
+                    textBox->setAngle(angle);
+                    replacements.push_back(clonedElement.release());
+                }
+            }
+        }
+        if (!replacements.empty())
+        {
+            m_scene.replaceElements(std::move(replacements));
+            updateGraphics();
+        }
+        return;
+    }
+
     if (pdf::PDFCreatePCElementTool* activeTool = qobject_cast<pdf::PDFCreatePCElementTool*>(getActiveTool()))
     {
         activeTool->setTextAngle(angle);
@@ -719,6 +827,11 @@ void EditorPlugin::setActive(bool active)
         // Abort active tool, if we are deactivating the plugin
         if (!active)
         {
+            // Unregister the persistent panel before m_scene is cleared, so it
+            // never keeps a dangling scene pointer. Also close a possibly open
+            // continuous edit transaction.
+            unregisterFormatPanel();
+
             if (pdf::PDFWidgetTool* tool = m_widget->getToolManager()->getActiveTool())
             {
                 auto it = std::find(m_tools.cbegin(), m_tools.cend(), tool);
@@ -740,6 +853,7 @@ void EditorPlugin::setActive(bool active)
         {
             clearUndoRedo();
             updateDockWidget();
+            registerFormatPanel();
             pdf::PDFTemporaryValueChange guard(&m_isUndoRedoInProgress, true);
             updateEditedPages();
             initializeUndoRedo();
@@ -862,6 +976,11 @@ void EditorPlugin::initializeUndoRedo()
 
 void EditorPlugin::createUndoStep()
 {
+    if (m_isContinuousEditInProgress)
+    {
+        return;
+    }
+
     m_undoStates.emplace_back(m_scene.captureState());
     m_redoStates.clear();
 
@@ -976,11 +1095,242 @@ void EditorPlugin::updateDockWidget()
         m_editorWidget->addAction(action);
     }
 
-    connect(m_editorWidget, &pdf::PDFPageContentEditorWidget::penChanged, this, &EditorPlugin::onPenChanged);
-    connect(m_editorWidget, &pdf::PDFPageContentEditorWidget::brushChanged, this, &EditorPlugin::onBrushChanged);
-    connect(m_editorWidget, &pdf::PDFPageContentEditorWidget::fontChanged, this, &EditorPlugin::onFontChanged);
-    connect(m_editorWidget, &pdf::PDFPageContentEditorWidget::alignmentChanged, this, &EditorPlugin::onAlignmentChanged);
-    connect(m_editorWidget, &pdf::PDFPageContentEditorWidget::textAngleChanged, this, &EditorPlugin::onTextAngleChanged);
+    // T05: the persistent Format panel is the single source of property
+    // signals. Hide the old Appearance section, so the two docks cannot fight
+    // over the same values. If the group box cannot be found, fall back to
+    // disabling the five style controls.
+    if (QWidget* appearanceGroup = m_editorWidget->findChild<QWidget*>("appearanceGroupBox"))
+    {
+        appearanceGroup->setVisible(false);
+    }
+    else
+    {
+        for (pdf::PDFPageContentEditorStyleSettings* settings :
+             m_editorWidget->findChildren<pdf::PDFPageContentEditorStyleSettings*>())
+        {
+            settings->setEnabled(false);
+        }
+    }
+
+    if (QMainWindow* mainWindow = m_dataExchangeInterface->getMainWindow())
+    {
+        if (pdf::PDFContextualFormatPanel* panel =
+                mainWindow->findChild<pdf::PDFContextualFormatPanel*>())
+        {
+            mainWindow->splitDockWidget(panel, m_editorWidget, Qt::Vertical);
+        }
+    }
+}
+
+void EditorPlugin::registerFormatPanel()
+{
+    QMainWindow* mainWindow = m_dataExchangeInterface->getMainWindow();
+    if (!mainWindow)
+    {
+        return;
+    }
+
+    pdf::PDFContextualFormatPanel* panel = mainWindow->findChild<pdf::PDFContextualFormatPanel*>();
+    if (!panel)
+    {
+        return;
+    }
+
+    m_formatPanel = panel;
+    panel->registerPageContentScene(&m_scene);
+
+    connect(panel, &pdf::PDFContextualFormatPanel::penChanged,
+            this, &EditorPlugin::onPenChanged, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::brushChanged,
+            this, &EditorPlugin::onBrushChanged, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::fontChanged,
+            this, &EditorPlugin::onFontChanged, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::alignmentChanged,
+            this, &EditorPlugin::onAlignmentChanged, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::textAngleChanged,
+            this, &EditorPlugin::onTextAngleChanged, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::inlineTextChanged,
+            this, &EditorPlugin::onInlineTextChanged, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::continuousEditStarted,
+            this, &EditorPlugin::onContinuousEditStarted, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::continuousEditFinished,
+            this, &EditorPlugin::onContinuousEditFinished, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::setAsDefaultRequested,
+            this, &EditorPlugin::onSetAsDefaultRequested, Qt::UniqueConnection);
+    connect(panel, &pdf::PDFContextualFormatPanel::annotationDefaultStyleRequested,
+            this, &EditorPlugin::onAnnotationDefaultStyleRequested, Qt::UniqueConnection);
+}
+
+void EditorPlugin::onSetAsDefaultRequested(const QFont& font, const QColor& color, Qt::Alignment alignment)
+{
+    pdf::PDFWidgetTool* activeTool = getActiveTool();
+    if (!activeTool)
+    {
+        return;
+    }
+
+    // A free text annotation stores its style in PDFFreeTextStyle, so it is
+    // promoted through the tool itself instead of PDFCreatePCElementTool.
+    if (pdf::PDFCreateFreeTextTool* freeTextTool = qobject_cast<pdf::PDFCreateFreeTextTool*>(activeTool))
+    {
+        freeTextTool->updateStyleFromPanel(font, alignment, color);
+        return;
+    }
+
+    pdf::PDFCreatePCElementTool* elementTool = qobject_cast<pdf::PDFCreatePCElementTool*>(activeTool);
+    if (!elementTool)
+    {
+        return;
+    }
+
+    // Only the defaults of the tool are written. getElement() returns the
+    // element the tool keeps for the next creation, not the current selection,
+    // so no selected object is modified here (AC-14).
+    if (pdf::PDFPageContentElement* element = elementTool->getElement())
+    {
+        if (pdf::PDFPageContentStyledElement* styled = dynamic_cast<pdf::PDFPageContentStyledElement*>(element))
+        {
+            // The pen width of the tool is kept, only the colour is promoted.
+            QPen pen = styled->getPen();
+            pen.setColor(color);
+            elementTool->setPen(pen);
+        }
+    }
+
+    elementTool->setFont(font);
+    elementTool->setAlignment(alignment);
+}
+
+void EditorPlugin::onAnnotationDefaultStyleRequested(const QColor& color)
+{
+    if (!color.isValid())
+    {
+        return;
+    }
+
+    pdf::PDFWidgetTool* activeTool = getActiveTool();
+    if (!activeTool)
+    {
+        return;
+    }
+
+    pdf::PDFAnnotationStyleManager* styleManager = activeTool->getAnnotationStyleManager();
+    if (!styleManager)
+    {
+        return;
+    }
+
+    // PDFAnnotationStyle has strokeColor / fillColor / penWidth only and no
+    // opacity member, so the opacity slider of the panel is intentionally
+    // ignored here (known limitation KI-06 / G-14).
+    pdf::PDFAnnotationStyle style = styleManager->getStyle();
+    style.strokeColor = color;
+    style.fillColor = color;
+    styleManager->setStyle(style);
+}
+
+void EditorPlugin::unregisterFormatPanel()
+{
+    if (m_isContinuousEditInProgress)
+    {
+        onContinuousEditFinished();
+    }
+
+    if (!m_formatPanel)
+    {
+        return;
+    }
+
+    m_formatPanel->unregisterPageContentScene(&m_scene);
+    QObject::disconnect(m_formatPanel.data(), nullptr, this, nullptr);
+    m_formatPanel = nullptr;
+}
+
+void EditorPlugin::onContinuousEditStarted()
+{
+    if (m_isContinuousEditInProgress)
+    {
+        return;
+    }
+
+    // Undo steps created during the interaction are suppressed, exactly one
+    // step is pushed when the interaction finishes.
+    m_isContinuousEditInProgress = true;
+}
+
+void EditorPlugin::onContinuousEditFinished()
+{
+    if (!m_isContinuousEditInProgress)
+    {
+        return;
+    }
+
+    m_isContinuousEditInProgress = false;
+
+    // The state *after* the interaction is pushed. The state before it is
+    // already on the stack (the last regular step), so pushing the pending
+    // pre-interaction snapshot would make the redo of the step a no-op.
+    m_undoStates.emplace_back(m_scene.captureState());
+    m_redoStates.clear();
+    while (m_undoStates.size() > MAX_UNDO_STEPS)
+    {
+        m_undoStates.erase(m_undoStates.begin());
+    }
+    updateActions();
+}
+
+void EditorPlugin::onInlineTextChanged(const QString& text)
+{
+    const std::set<pdf::PDFInteger> selectedIds = m_scene.getSelectedElementIds();
+    if (selectedIds.empty())
+    {
+        return;
+    }
+
+    // R-7: every selected text box receives the new text, not only the first
+    // one. The clones are collected and committed in a single batch, so the
+    // scene emits one change notification and the undo history gets one step.
+    std::vector<pdf::PDFPageContentElement*> replacements;
+
+    for (pdf::PDFInteger id : selectedIds)
+    {
+        pdf::PDFPageContentElement* element = m_scene.getElementById(id);
+        if (!element)
+        {
+            continue;
+        }
+
+        std::unique_ptr<pdf::PDFPageContentElement> clonedElement(element->clone());
+
+        if (pdf::PDFPageContentElementTextBox* textBox =
+                dynamic_cast<pdf::PDFPageContentElementTextBox*>(clonedElement.get()))
+        {
+            textBox->setText(text);
+            replacements.push_back(clonedElement.release());
+            continue;
+        }
+
+        // R-4: the text of the original page content is a part of the content
+        // stream, so the element has to be regenerated by the content editor -
+        // this is the same code path the removed "Edit Item" dialog used. The
+        // element must not be silently ignored.
+        pdf::PDFPageContentElementEdited* editedElement =
+            dynamic_cast<pdf::PDFPageContentElementEdited*>(clonedElement.get());
+        if (editedElement && editedElement->getElement() &&
+            editedElement->getElement()->asText())
+        {
+            if (updateTextElement(editedElement))
+            {
+                replacements.push_back(clonedElement.release());
+            }
+        }
+    }
+
+    if (!replacements.empty())
+    {
+        m_scene.replaceElements(std::move(replacements));
+        updateGraphics();
+    }
 }
 
 void EditorPlugin::updateEditedPages()
@@ -1092,6 +1442,12 @@ bool EditorPlugin::updateTextElement(pdf::PDFPageContentElementEdited* element)
         {
             return false;
         }
+    }
+    else
+    {
+        // finalize() failed, the document was not modified. Reporting success
+        // here would make the caller replace the element with a stale clone.
+        return false;
     }
 
     return true;
